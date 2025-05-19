@@ -1,0 +1,9 @@
+yt-dlp~=2025.3.31
+dotenv~=0.9.9
+python-dotenv~=1.1.0
+Pyrogram~=2.0.106
+python-docx~=1.1.2
+TgCrypto-pyrofork
+requests~=2.32.3
+PyQt5~=5.15.11
+mutagen~=1.47.0
