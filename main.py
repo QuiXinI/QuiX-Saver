@@ -31,7 +31,7 @@ if not os.path.isfile(USERS_FILE):
     with open(USERS_FILE, 'w', encoding='utf-8') as f:
         json.dump([], f)
 
-load_dotenv()
+load_dotenv(override=True)
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
