@@ -230,8 +230,8 @@ async def cb_handler(_, cq: CallbackQuery):
             'progress_hooks': [download_hook],
             'postprocessor_args': [
                 # Видео-кодек с аппаратным ускорением (без лишних -hwaccel) :contentReference[oaicite:0]{index=0}
-                '-c:v', enc['codec'],
-                *enc['extra_args'],
+                '-c:v', 'libx265',
+                '-crf', '25',
 
                 # preset для скорости/качества
                 '-preset', 'medium',
