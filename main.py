@@ -3,7 +3,10 @@ import json
 import logging
 import asyncio
 import glob
+import subprocess
+
 import requests
+import platform
 
 import yt_dlp
 from dotenv import load_dotenv
@@ -151,6 +154,30 @@ async def handle_link(_, msg):
 
 @app.on_callback_query()
 async def cb_handler(_, cq: CallbackQuery):
+    def choose_encoder():
+        sys = platform.system()
+        proc = platform.processor().lower()
+        # На Linux оба через VA-API
+        if sys == "Linux":
+            # AMD и Intel оба используют VA-API
+            return {
+                'codec': 'h265_vaapi',
+                'extra_args': ['-vaapi_device', '/dev/dri/renderD128', '-qp', '24']
+            }
+        # На Windows: Intel QSV
+        if sys == "Windows" and 'intel' in proc:
+            return {
+                'codec': 'h265_qsv',
+                'extra_args': ['-global_quality', '23']
+            }
+        # По-умолчанию — программное x265
+        return {
+            'codec': 'libx265',
+            'extra_args': ['-crf', '25']
+        }
+
+    enc = choose_encoder()
+
     track_user(cq.from_user.id)
     sessions = load_sessions()
     sess = sessions.get(str(cq.from_user.id))
@@ -160,42 +187,122 @@ async def cb_handler(_, cq: CallbackQuery):
     await cq.message.edit_reply_markup(None)
     url = sess['url']; title = sess['title']; author = sess['author']; info = sess['info']
 
-    status = await cq.message.reply_text("📲 Скачивание...")
+    status = await cq.message.reply_text("📥 Скачивание...")
     btn_again = InlineKeyboardMarkup(
         [[InlineKeyboardButton("🔄 Другой формат", callback_data="again")]]
     )
 
+    loop = asyncio.get_event_loop()
+    last_status = {"text": None}
+
     data = cq.data
     if data.startswith('video:'):
-        # Download video
         res = int(data.split(':')[1])
-        out = os.path.join(DOWNLOAD_DIR, f"{title}_{res}p.mp4")
-        opts = {
-            'format': f"bestvideo[ext=mp4][height<={res}]+bestaudio[ext=m4a]/best[ext=mp4]",
-            'quiet': True,
-            'outtmpl': out,
-            'merge_output_format': 'mp4'
-        }
-        await asyncio.get_event_loop().run_in_executor(
-            None, lambda: get_ydl(opts).download([url])
-        )
-        await status.edit_text("🚀 Отправка...")
+        out = os.path.join(DOWNLOAD_DIR, f"{title}_{res}p.mov")
 
-        async def progress(cur, tot):
-            pct = int(cur*100/tot) if tot else 0
-            try: await status.edit_text(f"🚀 Отправка... {pct}%")
-            except: pass
+        # прогресс-хук для yt-dlp
+        def download_hook(d):
+            status_text = None
+
+            if d['status'] == 'downloading':
+                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                cur = d.get('downloaded_bytes', 0)
+                pct = int(cur * 100 / total) if total else 0
+                status_text = f"📥 Скачивание... {pct}%"
+            elif d['status'] == 'finished':
+                status_text = ("✅ Загрузка завершена, начинаем конвертацию...\n Конвертация может занять значительное время")
+
+            # редактируем только если текст поменялся
+            if status_text and status_text != last_status["text"]:
+                last_status["text"] = status_text
+                # планируем вызов edit_text в основном loop
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(status.edit_text(status_text))
+                )
+
+        opts = {
+            'format': f"bestvideo[ext=mp4][height<={res}]+bestaudio[ext=m4a]/best[ext=mov]",
+            'quiet': True,
+            'restrictfilenames': True,
+            'windowsfilenames': True,
+            'outtmpl': out,
+            'merge_output_format': 'mov',
+            'progress_hooks': [download_hook],
+            'postprocessor_args': [
+                # Видео-кодек с аппаратным ускорением (без лишних -hwaccel) :contentReference[oaicite:0]{index=0}
+                '-c:v', enc['codec'],
+                *enc['extra_args'],
+
+                # preset для скорости/качества
+                '-preset', 'medium',
+
+                # iOS-дружественные метаданные
+                '-profile:v', 'main',
+                '-level', '3.1',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+
+                # Аудио: копирование оригинала
+                '-c:a', 'copy',
+            ],
+        }
+
+        ydl = get_ydl(opts)
+        info = ydl.extract_info(url, download=False)
+        width = info.get('width', 0)
+        height = info.get('height', 0)
+        duration = int(info.get('duration', 0))
+        aspect = f"{width}:{height}"
+
+        # скачиваем в треде
+        await loop.run_in_executor(None, lambda: ydl.download([url]))
+
+        caption = (
+            f"{title} — {author}\n"
+        )
+
+        # прогресс отправки (аналогично: только при изменении)
+        def send_progress(cur, tot):
+            pct = int(cur * 100 / tot) if tot else 0
+            status_text = f"🚀 Отправка... {pct}%"
+            if status_text != last_status["text"]:
+                last_status["text"] = status_text
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(status.edit_text(status_text))
+                )
 
         await cq.message.reply_video(
             out,
-            caption=f"{title} - {author} 🖥",
+            caption=caption,
             supports_streaming=True,
             reply_markup=btn_again,
-            progress=progress
+            progress=send_progress
         )
+
         os.remove(out)
 
     elif data == 'audio':
+
+        # прогресс-хук для yt-dlp
+        def download_hook(d):
+            status_text = None
+
+            if d['status'] == 'downloading':
+                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                cur = d.get('downloaded_bytes', 0)
+                pct = int(cur * 100 / total) if total else 0
+                status_text = f"📥 Скачивание... {pct}%"
+            elif d['status'] == 'finished':
+                status_text = ("✅ Загрузка завершена, начинаем конвертацию...\n Конвертация может занять до 10 минут")
+
+            # редактируем только если текст поменялся
+            if status_text and status_text != last_status["text"]:
+                last_status["text"] = status_text
+                # планируем вызов edit_text в основном loop
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(status.edit_text(status_text))
+                )
+
         # Download audio
         base = os.path.join(DOWNLOAD_DIR, title)
         opts = {
@@ -205,7 +312,8 @@ async def cb_handler(_, cq: CallbackQuery):
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'opus',
-                'preferredquality': '0'
+                'preferredquality': '0',
+                'progress_hooks': [download_hook],
             }]
         }
         await asyncio.get_event_loop().run_in_executor(
