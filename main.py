@@ -216,7 +216,7 @@ async def cb_handler(_, cq: CallbackQuery):
             f"{title} — {author}\n"
         )
 
-        # прогресс отправки (аналогично: только при изменении)
+        # прогресс отправки
         def send_progress(cur, tot):
             pct = int(cur * 100 / tot) if tot else 0
             status_text = f"🚀 Отправка... {pct}%"
@@ -316,6 +316,5 @@ async def cb_handler(_, cq: CallbackQuery):
 
     await status.delete()
 
-# Run bot
 if __name__ == '__main__':
     app.run()
