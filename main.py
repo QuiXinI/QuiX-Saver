@@ -3,10 +3,8 @@ import json
 import logging
 import asyncio
 import glob
-import subprocess
 
 import requests
-import platform
 
 import yt_dlp
 from dotenv import load_dotenv
@@ -154,30 +152,6 @@ async def handle_link(_, msg):
 
 @app.on_callback_query()
 async def cb_handler(_, cq: CallbackQuery):
-    def choose_encoder():
-        sys = platform.system()
-        proc = platform.processor().lower()
-        # На Linux оба через VA-API
-        if sys == "Linux":
-            # AMD и Intel оба используют VA-API
-            return {
-                'codec': 'h265_vaapi',
-                'extra_args': ['-vaapi_device', '/dev/dri/renderD128', '-qp', '24']
-            }
-        # На Windows: Intel QSV
-        if sys == "Windows" and 'intel' in proc:
-            return {
-                'codec': 'h265_qsv',
-                'extra_args': ['-global_quality', '23']
-            }
-        # По-умолчанию — программное x265
-        return {
-            'codec': 'libx265',
-            'extra_args': ['-crf', '25']
-        }
-
-    enc = choose_encoder()
-
     track_user(cq.from_user.id)
     sessions = load_sessions()
     sess = sessions.get(str(cq.from_user.id))
@@ -198,7 +172,7 @@ async def cb_handler(_, cq: CallbackQuery):
     data = cq.data
     if data.startswith('video:'):
         res = int(data.split(':')[1])
-        out = os.path.join(DOWNLOAD_DIR, f"{title}_{res}p.mov")
+        out = os.path.join(DOWNLOAD_DIR, f"{title}_{res}p.mp4")
 
         # прогресс-хук для yt-dlp
         def download_hook(d):
@@ -210,7 +184,7 @@ async def cb_handler(_, cq: CallbackQuery):
                 pct = int(cur * 100 / total) if total else 0
                 status_text = f"📥 Скачивание... {pct}%"
             elif d['status'] == 'finished':
-                status_text = ("✅ Загрузка завершена, начинаем конвертацию...\nКонвертация может занять значительное время")
+                status_text = ("✅ Загрузка завершена, начинаем конвертацию...\n Конвертация может занять значительное время")
 
             # редактируем только если текст поменялся
             if status_text and status_text != last_status["text"]:
@@ -221,31 +195,11 @@ async def cb_handler(_, cq: CallbackQuery):
                 )
 
         opts = {
-            'format': f"bestvideo[ext=mp4][height<={res}]+bestaudio[ext=m4a]/best[ext=mov]",
+            'format': f"bestvideo[ext=mp4][height<={res}]+bestaudio[ext=m4a]/best[ext=mp4]",
             'quiet': True,
-            'restrictfilenames': True,
-            'windowsfilenames': True,
             'outtmpl': out,
-            'merge_output_format': 'mov',
             'progress_hooks': [download_hook],
-            'postprocessor_args': [
-                # Видео-кодек с аппаратным ускорением (без лишних -hwaccel) :contentReference[oaicite:0]{index=0}
-                '-c:v', 'libx265',
-                '-crf', '25',
-
-                # preset для скорости/качества
-                '-preset', 'ultrafast',
-
-                # iOS-дружественные метаданные
-                '-profile:v', 'main',
-                '-level', '3.1',
-                '-pix_fmt', 'yuv420p',
-                '-movflags', '+faststart',
-
-                # Аудио: копирование оригинала
-                '-c:a', 'copy',
-                '-progress', 'CON',
-            ],
+            'merge_output_format': 'mp4'
         }
 
         ydl = get_ydl(opts)
