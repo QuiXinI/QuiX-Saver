@@ -85,7 +85,8 @@ def track_user(user_id: int):
 
 # Helper: create YoutubeDL instance
 def get_ydl(opts):
-    default = { 'cookiefile': COOKIES_FILE }
+    # default = {'cookiefile': COOKIES_FILE}
+    default = {}
     default.update(opts)
     return yt_dlp.YoutubeDL(default)
 
@@ -102,7 +103,7 @@ def format_keyboard(info):
         )
         row.append(InlineKeyboardButton(label, callback_data=f"video:{height}"))
         if len(row) == 2:
-            kb.append(row);
+            kb.append(row)
             row = []
     if row:
         kb.append(row)
@@ -119,11 +120,24 @@ async def handle_link(_, msg):
     track_user(msg.from_user.id)
     url = msg.text.strip()
 
-    # Extract info
-    info = await asyncio.get_event_loop().run_in_executor(
-        None,
-        lambda: get_ydl({ 'quiet': True, 'skip_download': True }).extract_info(url, False)
-    )
+    # Функция для получения форматов
+    def fetch_formats(url: str):
+        # Получаем информацию о форматах без вывода в консоль
+        ydl_opts = {
+            'quiet': True,         # подавить вывод в консоль
+            'skip_download': True, # не скачивать контент
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # extract_info вернёт словарь с ключом 'formats'
+            return ydl.extract_info(url, download=False)
+
+    # Используем уже запущенный event loop
+    loop = asyncio.get_running_loop()
+    try:
+        info = await loop.run_in_executor(None, fetch_formats, url)
+    except Exception as e:
+        logger.error(f"Error fetching formats: {e}")
+        return await msg.reply_text(f"Ошибка при получении форматов: {e}")
 
     # Clean title and author
     title = ''.join(
@@ -166,7 +180,7 @@ async def cb_handler(_, cq: CallbackQuery):
         [[InlineKeyboardButton("🔄 Другой формат", callback_data="again")]]
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     last_status = {"text": None}
 
     data = cq.data
@@ -271,7 +285,7 @@ async def cb_handler(_, cq: CallbackQuery):
             }],
             'progress_hooks': [download_hook],
         }
-        await asyncio.get_event_loop().run_in_executor(
+        await asyncio.get_running_loop().run_in_executor(
             None, lambda: get_ydl(opts).download([url])
         )
         opus_file = next(f for f in glob.glob(base + '.*') if f.endswith('.opus'))
