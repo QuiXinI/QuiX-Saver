@@ -268,8 +268,8 @@ async def cb_handler(_, cq: CallbackQuery):
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'opus',
                 'preferredquality': '0',
-                'progress_hooks': [download_hook],
-            }]
+            }],
+            'progress_hooks': [download_hook],
         }
         await asyncio.get_event_loop().run_in_executor(
             None, lambda: get_ydl(opts).download([url])
@@ -286,6 +286,15 @@ async def cb_handler(_, cq: CallbackQuery):
             else:
                 thumb = None
 
+        def send_progress(cur, tot):
+            pct = int(cur * 100 / tot) if tot else 0
+            status_text = f"🚀 Отправка... {pct}%"
+            if status_text != last_status["text"]:
+                last_status["text"] = status_text
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(status.edit_text(status_text))
+                )
+
         await status.edit_text("🚀 Отправка...")
         await cq.message.reply_audio(
             opus_file,
@@ -293,7 +302,8 @@ async def cb_handler(_, cq: CallbackQuery):
             title=title,
             performer=author,
             thumb=thumb,
-            reply_markup=btn_again
+            reply_markup=btn_again,
+            progress=send_progress
         )
         for f in glob.glob(base + '.*'):
             os.remove(f)
