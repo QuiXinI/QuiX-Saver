@@ -1,6 +1,6 @@
 {
   "comment": "this is an example of config.json, you might need to tweak it",
-  "edit_cooldown": 0.25,
+  "edit_cooldown": 0.5,
   "cookies_file":   "cookies.txt",
   "sessions_file":  "sessions.json",
   "users_file":     "users.json",

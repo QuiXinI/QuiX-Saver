@@ -200,15 +200,15 @@ async def cb_handler(_, cq: CallbackQuery):
         # прогресс-хук для yt-dlp
         def download_hook(d):
             """
-            Hook для yt_dlp: редактирует сообщение в чате не чаще, чем COOLDOWN_TIME секунд.
-            Ожидает, что есть глобальные last_status, _last_edit_ts, loop и status.
+            Hook for yt_dlp: edits the message in the chat no more frequently than COOLDOWN_TIME seconds.
+            Expects global variables last_status, _last_edit_ts, loop, and status to be defined.
             """
             global _last_edit_ts
 
-            # Считаем интервал с прошлого edit
+            # Calculate the interval since the last edit
             now = time.monotonic()
             if now - _last_edit_ts < COOLDOWN_TIME:
-                return  # выходит, если ещё рано
+                return  # Exit if it's too soon to edit again
 
             status_text = None
             if d.get('status') == 'downloading':
@@ -216,18 +216,13 @@ async def cb_handler(_, cq: CallbackQuery):
                 cur = d.get('downloaded_bytes', 0)
                 pct = int(cur * 100 / total) if total else 0
                 status_text = f"📥 Скачивание... {pct}%"
-            elif d.get('status') == 'finished':
-                status_text = (
-                    "✅ Загрузка завершена, начинаем конвертацию...\n"
-                    "Конвертация может занять значительное время"
-                )
 
-            # Если текст есть и он отличается от предыдущего — редактим
-            if status_text and status_text != last_status["text"]:
+            # If there is text and it's different from the last status, edit the message
+            if status_text and status_text != last_status.get("text"):
                 last_status["text"] = status_text
                 _last_edit_ts = now
 
-                # Запускаем edit_text в основном loop-е
+                # Schedule edit_text in the main loop
                 loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(status.edit_text(status_text))
                 )
@@ -275,23 +270,32 @@ async def cb_handler(_, cq: CallbackQuery):
         os.remove(out)
 
     elif data == 'audio':
-
         # прогресс-хук для yt-dlp
         def download_hook(d):
-            status_text = None
+            """
+            Hook for yt_dlp: edits the message in the chat no more frequently than COOLDOWN_TIME seconds.
+            Expects global variables last_status, _last_edit_ts, loop, and status to be defined.
+            """
+            global _last_edit_ts
 
-            if d['status'] == 'downloading':
+            # Calculate the interval since the last edit
+            now = time.monotonic()
+            if now - _last_edit_ts < COOLDOWN_TIME:
+                return  # Exit if it's too soon to edit again
+
+            status_text = None
+            if d.get('status') == 'downloading':
                 total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
                 cur = d.get('downloaded_bytes', 0)
                 pct = int(cur * 100 / total) if total else 0
                 status_text = f"📥 Скачивание... {pct}%"
-            elif d['status'] == 'finished':
-                status_text = ("✅ Загрузка завершена, начинаем конвертацию...\n Конвертация может занять до 10 минут")
 
-            # редактируем только если текст поменялся
-            if status_text and status_text != last_status["text"]:
+            # If there is text and it's different from the last status, edit the message
+            if status_text and status_text != last_status.get("text"):
                 last_status["text"] = status_text
-                # планируем вызов edit_text в основном loop
+                _last_edit_ts = now
+
+                # Schedule edit_text in the main loop
                 loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(status.edit_text(status_text))
                 )
