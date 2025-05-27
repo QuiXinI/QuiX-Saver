@@ -153,7 +153,7 @@ async def handle_link(_, msg):
             e = "видео не доступно на территории РФ и Германии"
         elif "copyright" in e:
             e = "видео закопирайчено, не можем скачать"
-        return await msg.reply_text(f"Ошибка при получении форматов: {e}")
+        return await msg.reply_text(f"❌ Ошибка при получении форматов: {e} ❌")
 
     # Clean title and author
     title = ''.join(
