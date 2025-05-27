@@ -96,6 +96,7 @@ def track_user(user_id: int):
 def get_ydl(opts):
     # default = {'cookiefile': COOKIES_FILE}
     default = {}
+    # default = {'cookies-from-browser': 'chrome'}
     default.update(opts)
     return yt_dlp.YoutubeDL(default)
 
@@ -146,6 +147,12 @@ async def handle_link(_, msg):
         info = await loop.run_in_executor(None, fetch_formats, url)
     except Exception as e:
         logger.error(f"Error fetching formats: {e}")
+        if "Sign in to confirm your age" in str(e):
+            e = "видео имеет ограничения возраста"
+        elif "This video is not available" in str(e):
+            e = "видео не доступно на территории РФ и Германии"
+        elif "copyright" in e:
+            e = "видео закопирайчено, не можем скачать"
         return await msg.reply_text(f"Ошибка при получении форматов: {e}")
 
     # Clean title and author
