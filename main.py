@@ -4,6 +4,7 @@ import logging
 import asyncio
 import glob
 import time
+import re
 
 import requests
 
@@ -18,6 +19,13 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+AUDIO_FORMATS = {
+    "mp3": "👎 MP3 👎",
+    "opus": "✨ Opus ✨",
+    "flac": "👾 FLAC 👾",
+    "wav": "🤓 WAV 🤓"
+}
 
 # Quality labels for video formats
 CATEGORY_LABELS = {
@@ -37,8 +45,8 @@ CONFIG_FILE  = os.path.join(BASE_DIR, "config.json")
 
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     _cfg = json.load(f)
+    # COOKIES_FILE = os.path.join(BASE_DIR, _cfg.get('cookies_file', "cookies.txt"))
     COOLDOWN_TIME = float(_cfg.get('edit_cooldown', 0.5))
-    COOKIES_FILE = os.path.join(BASE_DIR, _cfg.get('cookies_file', "cookies.txt"))
     SESSIONS_FILE = os.path.join(BASE_DIR, _cfg.get('sessions_file', "sessions.json"))
     USERS_FILE = os.path.join(BASE_DIR, _cfg.get('users_file', "users.json"))
     DOWNLOAD_DIR = os.path.join(BASE_DIR, _cfg.get('download_dir', "downloads"))
@@ -47,7 +55,7 @@ last_status = {"text": None}
 _last_edit_ts = 0.0
 
 # Ensure required files and directories exist
-assert os.path.isfile(COOKIES_FILE), f"Cookies file not found: {COOKIES_FILE}"
+# assert os.path.isfile(COOKIES_FILE), f"Cookies file not found: {COOKIES_FILE}"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 for path, default in (
@@ -94,13 +102,13 @@ def track_user(user_id: int):
 
 # Helper: create YoutubeDL instance
 def get_ydl(opts):
-    # default = {'cookiefile': COOKIES_FILE}
-    default = {}
     # default = {'cookies-from-browser': 'chrome'}
+    # default = {'cookies': COOKIES_FILE}
+    default = {'cookiesfrombrowser': ('firefox',),}
     default.update(opts)
     return yt_dlp.YoutubeDL(default)
 
-# Helper: format keyboard
+# Helper: format keyboard for video
 def format_keyboard(info):
     kb, row, seen = [], [], set()
     for f in sorted(info['formats'], key=lambda x: x.get('height') or 0, reverse=True):
@@ -120,28 +128,39 @@ def format_keyboard(info):
     kb.append([InlineKeyboardButton("🎧 Только звук", callback_data="audio")])
     return InlineKeyboardMarkup(kb)
 
+# Helper: format keyboard for audio formats
+def format_audio_keyboard():
+    kb = []
+    row = []
+    for key, label in AUDIO_FORMATS.items():
+        row.append(InlineKeyboardButton(label, callback_data=f"audioformat:{key}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    return InlineKeyboardMarkup(kb)
+
 @app.on_message(filters.command("start"))
 async def start_cmd(_, msg):
     track_user(msg.from_user.id)
-    await msg.reply_text("Привет! Отправь ссылку на YouTube.")
+    await msg.reply_text("Привет! Отправь ссылку на YouTube или Яндекс.Музыку.")
 
 @app.on_message(filters.regex(r"https?://(www\.)?youtu"))
-async def handle_link(_, msg):
+async def handle_youtube_link(_, msg):
     track_user(msg.from_user.id)
     url = msg.text.strip()
 
     # Функция для получения форматов
     def fetch_formats(url: str):
-        # Получаем информацию о форматах без вывода в консоль
         ydl_opts = {
-            'quiet': False,         # подавить вывод в консоль
-            'skip_download': True, # не скачивать контент
+            'quiet': False,
+            'skip_download': True,
+            'cookiesfrombrowser': ('firefox',),
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # extract_info вернёт словарь с ключом 'formats'
             return ydl.extract_info(url, download=False)
 
-    # Используем уже запущенный event loop
     loop = asyncio.get_running_loop()
     try:
         info = await loop.run_in_executor(None, fetch_formats, url)
@@ -155,28 +174,70 @@ async def handle_link(_, msg):
             e = "видео закопирайчено, не можем скачать"
         return await msg.reply_text(f"❌ Ошибка при получении форматов: {e} ❌")
 
-    # Clean title and author
     title = ''.join(
         c for c in info.get('title','')
         if c.isalnum() or c in (' ','.','_','-')
     ).strip()
     author = info.get('uploader','Unknown')
 
-    # Save session
     sessions = load_sessions()
     sessions[str(msg.from_user.id)] = {
         'url': url,
         'info': info,
         'title': title,
-        'author': author
+        'author': author,
+        'type': 'video'
     }
     save_sessions(sessions)
 
-    # Send keyboard
     kb = format_keyboard(info)
     await msg.reply_photo(
         info.get('thumbnail'),
         caption=f"{title} - {author}",
+        reply_markup=kb
+    )
+
+@app.on_message(filters.regex(r"https?://(music\.youtube\.com|music\.yandex\.ru)"))
+async def handle_music_link(_, msg):
+    track_user(msg.from_user.id)
+    url = msg.text.strip()
+
+    def fetch_info(url: str):
+        ydl_opts = {'quiet': False, 'skip_download': True, 'cookiesfrombrowser': ('firefox',)}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    loop = asyncio.get_running_loop()
+    try:
+        info = await loop.run_in_executor(None, fetch_info, url)
+    except Exception as e:
+        logger.error(f"Error fetching info: {e}")
+        return await msg.reply_text(f"❌ Ошибка при получении информации: {e} ❌")
+
+    # Extract and clean the title and author
+    full_title = info.get('title', '')
+    title = full_title.split(' - ')[0].strip()  # Take the part before the first ' - ' as the title
+
+    # Extract author information
+    author = info.get('artist') or info.get('uploader', 'Unknown')
+
+    # If the author is part of the title, remove it
+    if author in full_title:
+        title = full_title.replace(author, '').strip().replace('  ', ' ').strip('- ')
+
+    sessions = load_sessions()
+    sessions[str(msg.from_user.id)] = {
+        'url': url,
+        'info': info,
+        'title': title,
+        'author': author,
+        'type': 'audio'
+    }
+    save_sessions(sessions)
+
+    kb = format_audio_keyboard()
+    await msg.reply_text(
+        f"{title} - {author}",
         reply_markup=kb
     )
 
@@ -189,47 +250,35 @@ async def cb_handler(_, cq: CallbackQuery):
         return await cq.answer("Сессия не найдена", show_alert=True)
 
     await cq.message.edit_reply_markup(None)
-    url = sess['url']; title = sess['title']; author = sess['author']; info = sess['info']
+    url = sess['url']; title = sess['title']; author = sess['author']; info = sess['info']; link_type = sess.get('type')
 
     status = await cq.message.reply_text("📥 Скачивание...")
-    btn_again = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔄 Другой формат", callback_data="again")]]
-    )
+    btn_again = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Другой формат", callback_data="again")]
+    ])
 
     loop = asyncio.get_running_loop()
     last_status = {"text": None}
-
     data = cq.data
-    if data.startswith('video:'):
+
+    if data.startswith('video:') and link_type == 'video':
         res = int(data.split(':')[1])
         out = os.path.join(DOWNLOAD_DIR, f"{title}_{res}p.mp4")
 
-        # прогресс-хук для yt-dlp
         def download_hook(d):
-            """
-            Hook for yt_dlp: edits the message in the chat no more frequently than COOLDOWN_TIME seconds.
-            Expects global variables last_status, _last_edit_ts, loop, and status to be defined.
-            """
             global _last_edit_ts
-
-            # Calculate the interval since the last edit
             now = time.monotonic()
             if now - _last_edit_ts < COOLDOWN_TIME:
-                return  # Exit if it's too soon to edit again
-
+                return
             status_text = None
             if d.get('status') == 'downloading':
                 total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
                 cur = d.get('downloaded_bytes', 0)
                 pct = int(cur * 100 / total) if total else 0
                 status_text = f"📥 Скачивание... {pct}%"
-
-            # If there is text and it's different from the last status, edit the message
             if status_text and status_text != last_status.get("text"):
                 last_status["text"] = status_text
                 _last_edit_ts = now
-
-                # Schedule edit_text in the main loop
                 loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(status.edit_text(status_text))
                 )
@@ -240,23 +289,14 @@ async def cb_handler(_, cq: CallbackQuery):
             'quiet': False,
             'outtmpl': out,
             'progress_hooks': [download_hook],
+            'cookiesfrombrowser': ('firefox',),
         }
 
         ydl = get_ydl(opts)
         info = ydl.extract_info(url, download=False)
-        width = info.get('width', 0)
-        height = info.get('height', 0)
-        duration = int(info.get('duration', 0))
-        aspect = f"{width}:{height}"
-
-        # скачиваем в треде
         await loop.run_in_executor(None, lambda: ydl.download([url]))
 
-        caption = (
-            f"{title} — {author}\n"
-        )
-
-        # прогресс отправки
+        caption = f"{title} — {author}\n"
         def send_progress(cur, tot):
             pct = int(cur * 100 / tot) if tot else 0
             status_text = f"🚀 Отправка... {pct}%"
@@ -273,41 +313,86 @@ async def cb_handler(_, cq: CallbackQuery):
             reply_markup=btn_again,
             progress=send_progress
         )
-
         os.remove(out)
 
-    elif data == 'audio':
-        # прогресс-хук для yt-dlp
-        def download_hook(d):
-            """
-            Hook for yt_dlp: edits the message in the chat no more frequently than COOLDOWN_TIME seconds.
-            Expects global variables last_status, _last_edit_ts, loop, and status to be defined.
-            """
-            global _last_edit_ts
+    elif data.startswith('audioformat:') and link_type == 'audio':
+        fmt = data.split(':')[1]
+        base = os.path.join(DOWNLOAD_DIR, title)
+        postprocessors = []
+        postprocessors.append({
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': fmt,
+            'preferredquality': '0',
+        })
+        postprocessors.append({'key': 'FFmpegMetadata'})
 
-            # Calculate the interval since the last edit
+        opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': base + '.%(ext)s',
+            'quiet': False,
+            'postprocessors': postprocessors,
+            'progress_hooks': [
+                lambda d: download_hook_shared(d, loop, status, last_status)
+            ],
+            'cookiesfrombrowser': ('firefox',),
+        }
+
+        await loop.run_in_executor(None, lambda: get_ydl(opts).download([url]))
+        # Найти файл нужного формата
+        audio_file = next(f for f in glob.glob(base + '.*') if f.endswith(f'.{fmt}'))
+
+        thumb = None
+        thumb_url = info.get('thumbnail') or info.get('thumbnails', [{}])[-1].get('url')
+        if thumb_url:
+            thumb = base + '.jpg'
+            r = requests.get(thumb_url, timeout=10)
+            if r.ok:
+                open(thumb, 'wb').write(r.content)
+            else:
+                thumb = None
+
+        def send_progress(cur, tot):
+            pct = int(cur * 100 / tot) if tot else 0
+            status_text = f"🚀 Отправка... {pct}%"
+            if status_text != last_status["text"]:
+                last_status["text"] = status_text
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(status.edit_text(status_text))
+                )
+
+        await status.edit_text("🚀 Отправка...")
+        await cq.message.reply_audio(
+            audio_file,
+            caption=f"{title} - {author} 🎧",
+            title=title,
+            performer=author,
+            thumb=thumb,
+            reply_markup=btn_again,
+            progress=send_progress
+        )
+        for f in glob.glob(base + '.*'):
+            os.remove(f)
+
+    elif data == 'audio' and link_type == 'video':
+        # Existing audio extraction for YouTube video (Opus)
+        def download_hook(d):
+            global _last_edit_ts
             now = time.monotonic()
             if now - _last_edit_ts < COOLDOWN_TIME:
-                return  # Exit if it's too soon to edit again
-
+                return
             status_text = None
             if d.get('status') == 'downloading':
                 total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
                 cur = d.get('downloaded_bytes', 0)
                 pct = int(cur * 100 / total) if total else 0
                 status_text = f"📥 Скачивание... {pct}%"
-
-            # If there is text and it's different from the last status, edit the message
             if status_text and status_text != last_status.get("text"):
                 last_status["text"] = status_text
                 _last_edit_ts = now
-
-                # Schedule edit_text in the main loop
                 loop.call_soon_threadsafe(
                     lambda: asyncio.create_task(status.edit_text(status_text))
                 )
 
-        # Download audio
         base = os.path.join(DOWNLOAD_DIR, title)
         opts = {
             'format': 'bestaudio/best',
@@ -319,6 +404,7 @@ async def cb_handler(_, cq: CallbackQuery):
                 'preferredquality': '0',
             }],
             'progress_hooks': [download_hook],
+            'cookiesfrombrowser': ('firefox',),
         }
         await asyncio.get_running_loop().run_in_executor(
             None, lambda: get_ydl(opts).download([url])
@@ -359,11 +445,35 @@ async def cb_handler(_, cq: CallbackQuery):
 
     elif data == 'again':
         await status.delete()
-        kb = format_keyboard(info)
-        await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
+        if link_type == 'video':
+            kb = format_keyboard(info)
+            await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
+        else:
+            kb = format_audio_keyboard()
+            await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
         return
 
     await status.delete()
+
+# Shared download hook for audio formats
+
+def download_hook_shared(d, loop, status, last_status):
+    global _last_edit_ts
+    now = time.monotonic()
+    if now - _last_edit_ts < COOLDOWN_TIME:
+        return
+    status_text = None
+    if d.get('status') == 'downloading':
+        total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+        cur = d.get('downloaded_bytes', 0)
+        pct = int(cur * 100 / total) if total else 0
+        status_text = f"📥 Скачивание... {pct}%"
+    if status_text and status_text != last_status.get("text"):
+        last_status["text"] = status_text
+        _last_edit_ts = now
+        loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(status.edit_text(status_text))
+        )
 
 if __name__ == '__main__':
     app.run()
