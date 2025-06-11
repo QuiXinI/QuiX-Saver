@@ -45,6 +45,7 @@ CONFIG_FILE  = os.path.join(BASE_DIR, "config.json")
 
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     _cfg = json.load(f)
+    # COOKIES_FILE = os.path.join(BASE_DIR, _cfg.get('cookies_file', "cookies.txt"))
     COOLDOWN_TIME = float(_cfg.get('edit_cooldown', 0.5))
     SESSIONS_FILE = os.path.join(BASE_DIR, _cfg.get('sessions_file', "sessions.json"))
     USERS_FILE = os.path.join(BASE_DIR, _cfg.get('users_file', "users.json"))
@@ -54,6 +55,7 @@ last_status = {"text": None}
 _last_edit_ts = 0.0
 
 # Ensure required files and directories exist
+# assert os.path.isfile(COOKIES_FILE), f"Cookies file not found: {COOKIES_FILE}"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 for path, default in (
@@ -74,7 +76,8 @@ if not all([API_ID, API_HASH, BOT_TOKEN]):
     exit(1)
 
 # Initialize bot client
-app = Client("ytbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+token = BOT_TOKEN
+app = Client("ytbot", api_id=API_ID, api_hash=API_HASH, bot_token=token)
 
 # Session management on disk
 def load_sessions():
@@ -86,6 +89,7 @@ def save_sessions(sessions):
         json.dump(sessions, f, ensure_ascii=False, indent=2)
 
 def track_user(user_id: int):
+    # Track in users.json
     with open(USERS_FILE, 'r+', encoding='utf-8') as f:
         users = json.load(f)
         if user_id not in users:
@@ -95,45 +99,14 @@ def track_user(user_id: int):
             f.truncate()
 
 # Helper: create YoutubeDL instance
-def get_ydl(opts):
-    # default = {'cookies-from-browser': 'chrome'}
-    # default = {'cookies': COOKIES_FILE}
-    default = {'cookiesfrombrowser': ('firefox',),}
-    default.update(opts)
-    return yt_dlp.YoutubeDL(default)
-
-# Helper: format keyboard for video
-def format_keyboard(info):
-    kb, row, seen = [], [], set()
-    for f in sorted(info['formats'], key=lambda x: x.get('height') or 0, reverse=True):
-        height = f.get('height')
-        if not height or height in seen:
-            continue
-        seen.add(height)
-        label = CATEGORY_LABELS.get(
-            height, f"{height}p {'📺' if height < 720 else '🖥'}"
-        )
-        row.append(InlineKeyboardButton(label, callback_data=f"video:{height}"))
-        if len(row) == 2:
-            kb.append(row)
-            row = []
-    if row:
-        kb.append(row)
-    kb.append([InlineKeyboardButton("🎧 Только звук", callback_data="audio")])
-    return InlineKeyboardMarkup(kb)
-
-# Helper: format keyboard for audio formats
-def format_audio_keyboard():
-    kb = []
-    row = []
-    for key, label in AUDIO_FORMATS.items():
-        row.append(InlineKeyboardButton(label, callback_data=f"audioformat:{key}"))
-        if len(row) == 2:
-            kb.append(row)
-            row = []
-    if row:
-        kb.append(row)
-    return InlineKeyboardMarkup(kb)
+def get_ydl(opts, is_youtube=False):
+    # Disable cookies for YouTube/YouTube Music, enable for Yandex Music
+    if is_youtube:
+        ydl_opts = {'cookiesfrombrowser': ('firefox',)}
+    else:
+        ydl_opts = {'cookiesfrombrowser': ('firefox',)}  # Keep cookies for Yandex Music
+    ydl_opts.update(opts)
+    return yt_dlp.YoutubeDL(ydl_opts)
 
 @app.on_message(filters.command("start"))
 async def start_cmd(_, msg):
@@ -145,19 +118,17 @@ async def handle_youtube_link(_, msg):
     track_user(msg.from_user.id)
     url = msg.text.strip()
 
-    # Функция для получения форматов
-    def fetch_formats(url: str):
+    def fetch_formats(url: str, is_youtube=True):
         ydl_opts = {
             'quiet': False,
             'skip_download': True,
-            'cookiesfrombrowser': ('firefox',),
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
 
     loop = asyncio.get_running_loop()
     try:
-        info = await loop.run_in_executor(None, fetch_formats, url)
+        info = await loop.run_in_executor(None, fetch_formats, url, True)  # Pass True for YouTube
     except Exception as e:
         logger.error(f"Error fetching formats: {e}")
         if "Sign in to confirm your age" in str(e):
@@ -196,26 +167,23 @@ async def handle_music_link(_, msg):
     track_user(msg.from_user.id)
     url = msg.text.strip()
 
-    def fetch_info(url: str):
-        ydl_opts = {'quiet': False, 'skip_download': True, 'cookiesfrombrowser': ('firefox',)}
+    def fetch_info(url: str, is_youtube=False):
+        ydl_opts = {'quiet': False, 'skip_download': True}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
 
     loop = asyncio.get_running_loop()
     try:
-        info = await loop.run_in_executor(None, fetch_info, url)
+        info = await loop.run_in_executor(None, fetch_info, url, False)  # Pass False for Yandex Music
     except Exception as e:
         logger.error(f"Error fetching info: {e}")
         return await msg.reply_text(f"❌ Ошибка при получении информации: {e} ❌")
 
-    # Extract and clean the title and author
     full_title = info.get('title', '')
     title = full_title.split(' - ')[0].strip()  # Take the part before the first ' - ' as the title
 
-    # Extract author information
     author = info.get('artist') or info.get('uploader', 'Unknown')
 
-    # If the author is part of the title, remove it
     if author in full_title:
         title = full_title.replace(author, '').strip().replace('  ', ' ').strip('- ')
 
