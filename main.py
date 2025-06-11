@@ -45,7 +45,6 @@ CONFIG_FILE  = os.path.join(BASE_DIR, "config.json")
 
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     _cfg = json.load(f)
-    # COOKIES_FILE = os.path.join(BASE_DIR, _cfg.get('cookies_file', "cookies.txt"))
     COOLDOWN_TIME = float(_cfg.get('edit_cooldown', 0.5))
     SESSIONS_FILE = os.path.join(BASE_DIR, _cfg.get('sessions_file', "sessions.json"))
     USERS_FILE = os.path.join(BASE_DIR, _cfg.get('users_file', "users.json"))
@@ -55,7 +54,6 @@ last_status = {"text": None}
 _last_edit_ts = 0.0
 
 # Ensure required files and directories exist
-# assert os.path.isfile(COOKIES_FILE), f"Cookies file not found: {COOKIES_FILE}"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 for path, default in (
@@ -76,22 +74,18 @@ if not all([API_ID, API_HASH, BOT_TOKEN]):
     exit(1)
 
 # Initialize bot client
-token = BOT_TOKEN
-app = Client("ytbot", api_id=API_ID, api_hash=API_HASH, bot_token=token)
+app = Client("ytbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # Session management on disk
 def load_sessions():
     with open(SESSIONS_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-
 def save_sessions(sessions):
     with open(SESSIONS_FILE, 'w', encoding='utf-8') as f:
         json.dump(sessions, f, ensure_ascii=False, indent=2)
 
-
 def track_user(user_id: int):
-    # Track in users.json
     with open(USERS_FILE, 'r+', encoding='utf-8') as f:
         users = json.load(f)
         if user_id not in users:
