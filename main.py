@@ -147,6 +147,13 @@ async def handle_youtube_link(_, msg):
         ydl_opts = {
             'quiet': False,
             'skip_download': True,
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/115.0.0.0 Safari/537.36'
+                )
+            }
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
@@ -281,6 +288,13 @@ async def cb_handler(_, cq: CallbackQuery):
             'quiet': False,
             'outtmpl': out,
             'progress_hooks': [download_hook],
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/115.0.0.0 Safari/537.36'
+                )
+            }
         }
 
         ydl = get_ydl(opts)
@@ -325,6 +339,13 @@ async def cb_handler(_, cq: CallbackQuery):
             'progress_hooks': [
                 lambda d: download_hook_shared(d, loop, status, last_status)
             ],
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/115.0.0.0 Safari/537.36'
+                )
+            }
         }
         if "yandex" in url:
             opts['cookiesfrombrowser'] = ('firefox',)
@@ -394,6 +415,13 @@ async def cb_handler(_, cq: CallbackQuery):
                 'preferredquality': '0',
             }],
             'progress_hooks': [download_hook],
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/115.0.0.0 Safari/537.36'
+                )
+            }
         }
         await asyncio.get_running_loop().run_in_executor(
             None, lambda: get_ydl(opts).download([url])
@@ -464,4 +492,4 @@ def download_hook_shared(d, loop, status, last_status):
         )
 
 if __name__ == '__main__':
-    app.start()
+    app.run()
