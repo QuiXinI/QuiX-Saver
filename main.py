@@ -4,6 +4,7 @@ import logging
 import asyncio
 import glob
 import time
+
 import re
 import requests
 import yt_dlp
@@ -463,12 +464,4 @@ def download_hook_shared(d, loop, status, last_status):
         )
 
 if __name__ == '__main__':
-    try:
-        app.start()
-    except AttributeError as e:
-        if 'BadMsgNotification' in str(e):
-            logger.warning("Time sync issue detected, retrying start...")
-            time.sleep(1)
-            app.start()
-        else:
-            raise
+    app.start()
