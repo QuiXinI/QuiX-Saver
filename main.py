@@ -5,9 +5,7 @@ import asyncio
 import glob
 import time
 import re
-
 import requests
-
 import yt_dlp
 from dotenv import load_dotenv
 from pyrogram import Client, filters, idle
@@ -40,8 +38,8 @@ CATEGORY_LABELS = {
 }
 
 # Directories and files
-BASE_DIR     = os.path.abspath(os.path.dirname(__file__))
-CONFIG_FILE  = os.path.join(BASE_DIR, "config.json")
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     _cfg = json.load(f)
@@ -96,9 +94,7 @@ def track_user(user_id: int):
 
 # YoutubeDL helper
 def get_ydl(opts):
-    # default = {'cookies-from-browser': 'chrome'}
-    # default = {'cookies': COOKIES_FILE}
-    default = {'cookiesfrombrowser': ('firefox',),}
+    default = {}
     default.update(opts)
     return yt_dlp.YoutubeDL(default)
 
@@ -145,12 +141,11 @@ async def handle_youtube_link(_, msg):
     track_user(msg.from_user.id)
     url = msg.text.strip()
 
-    # Функция для получения форматов
+    # Function to get formats
     def fetch_formats(url: str):
         ydl_opts = {
             'quiet': False,
             'skip_download': True,
-            'cookiesfrombrowser': ('firefox',),
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
@@ -164,7 +159,7 @@ async def handle_youtube_link(_, msg):
             e = "видео имеет ограничения возраста"
         elif "This video is not available" in str(e):
             e = "видео не доступно на территории РФ и Германии"
-        elif "copyright" in e:
+        elif "copyright" in str(e):
             e = "видео закопирайчено, не можем скачать"
         return await msg.reply_text(f"❌ Ошибка при получении форматов: {e} ❌")
 
@@ -197,7 +192,9 @@ async def handle_music_link(_, msg):
     url = msg.text.strip()
 
     def fetch_info(url: str):
-        ydl_opts = {'quiet': False, 'skip_download': True, 'cookiesfrombrowser': ('firefox',)}
+        ydl_opts = {'quiet': False, 'skip_download': True}
+        if "yandex" in url:
+            ydl_opts['cookiesfrombrowser'] = ('firefox',)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
 
@@ -210,7 +207,7 @@ async def handle_music_link(_, msg):
 
     # Extract and clean the title and author
     full_title = info.get('title', '')
-    title = full_title.split(' - ')[0].strip()  # Take the part before the first ' - ' as the title
+    title = full_title.split(' - ')[0].strip()
 
     # Extract author information
     author = info.get('artist') or info.get('uploader', 'Unknown')
@@ -283,7 +280,6 @@ async def cb_handler(_, cq: CallbackQuery):
             'quiet': False,
             'outtmpl': out,
             'progress_hooks': [download_hook],
-            'cookiesfrombrowser': ('firefox',),
         }
 
         ydl = get_ydl(opts)
@@ -328,11 +324,11 @@ async def cb_handler(_, cq: CallbackQuery):
             'progress_hooks': [
                 lambda d: download_hook_shared(d, loop, status, last_status)
             ],
-            'cookiesfrombrowser': ('firefox',),
         }
+        if "yandex" in url:
+            opts['cookiesfrombrowser'] = ('firefox',)
 
         await loop.run_in_executor(None, lambda: get_ydl(opts).download([url]))
-        # Найти файл нужного формата
         audio_file = next(f for f in glob.glob(base + '.*') if f.endswith(f'.{fmt}'))
 
         thumb = None
@@ -368,7 +364,6 @@ async def cb_handler(_, cq: CallbackQuery):
             os.remove(f)
 
     elif data == 'audio' and link_type == 'video':
-        # Existing audio extraction for YouTube video (Opus)
         def download_hook(d):
             global _last_edit_ts
             now = time.monotonic()
@@ -398,7 +393,6 @@ async def cb_handler(_, cq: CallbackQuery):
                 'preferredquality': '0',
             }],
             'progress_hooks': [download_hook],
-            'cookiesfrombrowser': ('firefox',),
         }
         await asyncio.get_running_loop().run_in_executor(
             None, lambda: get_ydl(opts).download([url])
@@ -450,7 +444,6 @@ async def cb_handler(_, cq: CallbackQuery):
     await status.delete()
 
 # Shared download hook for audio formats
-
 def download_hook_shared(d, loop, status, last_status):
     global _last_edit_ts
     now = time.monotonic()
