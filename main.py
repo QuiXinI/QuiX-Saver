@@ -10,7 +10,7 @@ import requests
 
 import yt_dlp
 from dotenv import load_dotenv
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 
 # Logging configuration
@@ -45,7 +45,6 @@ CONFIG_FILE  = os.path.join(BASE_DIR, "config.json")
 
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     _cfg = json.load(f)
-    # COOKIES_FILE = os.path.join(BASE_DIR, _cfg.get('cookies_file', "cookies.txt"))
     COOLDOWN_TIME = float(_cfg.get('edit_cooldown', 0.5))
     SESSIONS_FILE = os.path.join(BASE_DIR, _cfg.get('sessions_file', "sessions.json"))
     USERS_FILE = os.path.join(BASE_DIR, _cfg.get('users_file', "users.json"))
@@ -55,9 +54,7 @@ last_status = {"text": None}
 _last_edit_ts = 0.0
 
 # Ensure required files and directories exist
-# assert os.path.isfile(COOKIES_FILE), f"Cookies file not found: {COOKIES_FILE}"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
 for path, default in (
     (USERS_FILE, []),
     (SESSIONS_FILE, {})
@@ -84,14 +81,11 @@ def load_sessions():
     with open(SESSIONS_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-
 def save_sessions(sessions):
     with open(SESSIONS_FILE, 'w', encoding='utf-8') as f:
         json.dump(sessions, f, ensure_ascii=False, indent=2)
 
-
 def track_user(user_id: int):
-    # Track in users.json
     with open(USERS_FILE, 'r+', encoding='utf-8') as f:
         users = json.load(f)
         if user_id not in users:
@@ -100,7 +94,7 @@ def track_user(user_id: int):
             json.dump(users, f, ensure_ascii=False, indent=2)
             f.truncate()
 
-# Helper: create YoutubeDL instance
+# YoutubeDL helper
 def get_ydl(opts):
     # default = {'cookies-from-browser': 'chrome'}
     # default = {'cookies': COOKIES_FILE}
@@ -476,4 +470,12 @@ def download_hook_shared(d, loop, status, last_status):
         )
 
 if __name__ == '__main__':
-    app.run()
+    try:
+        app.start()
+    except AttributeError as e:
+        if 'BadMsgNotification' in str(e):
+            logger.warning("Time sync issue detected, retrying start...")
+            time.sleep(1)
+            app.start()
+        else:
+            raise
