@@ -2,7 +2,7 @@
 
 **Другие системы:** ***[Windows](./readme_ru_win.md)*** | [Linux](./readme_ru_linux.md)
 
-**Языки:** [English](./readme.md) | ***[Русский](./readme_ru_win.md)***
+**Языки:** [English](../readme.md) | ***[Русский](./readme_ru_win.md)***
 
 ---
 

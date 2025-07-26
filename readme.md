@@ -1,8 +1,8 @@
 # Windows Quick Start Guide to localhost same bot
 
-**Other OSs:** ***[Windows](./readme.md)*** | [Linux](./readme_eng_linux.md)
+**Other OSs:** ***[Windows](readme.md)*** | [Linux](readmes/readme_eng_linux.md)
 
-**Languages:** ***[English](./readme.md)*** | [Русский](./readme_ru_win.md)
+**Languages:** ***[English](readme.md)*** | [Русский](readmes/readme_ru_win.md)
 
 ---
 
