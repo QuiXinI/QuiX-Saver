@@ -1,6 +1,6 @@
 # Linux Quick Start Guide to localhost same bot
 
-**Other OSs:** [Windows](./readme_eng_win.md) | ***[Linux](./readme_eng_linux.md)***
+**Other OSs:** [Windows](./readme.md) | ***[Linux](./readme_eng_linux.md)***
 
 **Languages:** ***[English](./readme_eng_linux.md)*** | [Русский](./readme_ru_linux.md)
 
