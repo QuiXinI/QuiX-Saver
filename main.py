@@ -93,6 +93,23 @@ def track_user(user_id: int):
             json.dump(users, f, ensure_ascii=False, indent=2)
             f.truncate()
 
+def get_msg_id(message):
+    """
+    Совместимый способ получить идентификатор сообщения из объекта pyrogram.Message.
+    Поддерживает `.message_id` (старые версии) и `.id` (новые).
+    """
+    mid = getattr(message, "message_id", None)
+    if mid is None:
+        mid = getattr(message, "id", None)
+    return mid
+
+def make_session_key(message):
+    mid = get_msg_id(message)
+    if mid is None:
+        # это должно никогда не случиться, но на случай - явная ошибка
+        raise ValueError("Cannot determine message id for session key")
+    return f"{message.chat.id}:{mid}"
+
 # YoutubeDL helper
 def get_ydl(opts):
     default = {}
@@ -177,22 +194,25 @@ async def handle_youtube_link(_, msg):
     ).strip()
     author = info.get('uploader','Unknown')
 
-    sessions = load_sessions()
-    sessions[str(msg.from_user.id)] = {
-        'url': url,
-        'info': info,
-        'title': title,
-        'author': author,
-        'type': 'video'
-    }
-    save_sessions(sessions)
-
     kb = format_keyboard(info)
-    await msg.reply_photo(
+    # отправляем сообщение с клавиатурой и сохраняем сессию под ключем chat_id:message_id
+    reply = await msg.reply_photo(
         info.get('thumbnail'),
         caption=f"{title} - {author}",
         reply_markup=kb
     )
+
+    sessions = load_sessions()
+    key = make_session_key(reply)
+    sessions[key] = {
+        'url': url,
+        'info': info,
+        'title': title,
+        'author': author,
+        'type': 'video',
+        'initiator': msg.from_user.id
+    }
+    save_sessions(sessions)
 
 @app.on_message(filters.regex(r"https?://(music\.youtube\.com|music\.yandex\.ru)"))
 async def handle_music_link(_, msg):
@@ -224,29 +244,39 @@ async def handle_music_link(_, msg):
     if author in full_title:
         title = full_title.replace(author, '').strip().replace('  ', ' ').strip('- ')
 
+    kb = format_audio_keyboard()
+    reply = await msg.reply_text(
+        f"{title} - {author}",
+        reply_markup=kb
+    )
+
     sessions = load_sessions()
-    sessions[str(msg.from_user.id)] = {
+    key = make_session_key(reply)
+    sessions[key] = {
         'url': url,
         'info': info,
         'title': title,
         'author': author,
-        'type': 'audio'
+        'type': 'audio',
+        'initiator': msg.from_user.id
     }
     save_sessions(sessions)
-
-    kb = format_audio_keyboard()
-    await msg.reply_text(
-        f"{title} - {author}",
-        reply_markup=kb
-    )
 
 @app.on_callback_query()
 async def cb_handler(_, cq: CallbackQuery):
     track_user(cq.from_user.id)
     sessions = load_sessions()
-    sess = sessions.get(str(cq.from_user.id))
+    key = make_session_key(cq.message)
+
+    # поддержка старых сессий (по user_id) — опционально, но оставим как fallback
+    sess = sessions.get(key) or sessions.get(str(cq.from_user.id))
     if not sess:
         return await cq.answer("Сессия не найдена", show_alert=True)
+
+    # если сессия была по user_id (фолбек), то лучше перенести её на message-ключ, но не обязательно
+    if key not in sessions and str(cq.from_user.id) in sessions:
+        sessions[key] = sessions.pop(str(cq.from_user.id))
+        save_sessions(sessions)
 
     await cq.message.edit_reply_markup(None)
     url = sess['url']; title = sess['title']; author = sess['author']; info = sess['info']; link_type = sess.get('type')
@@ -260,6 +290,7 @@ async def cb_handler(_, cq: CallbackQuery):
     last_status = {"text": None}
     data = cq.data
 
+    # функция загрузки используем один и тот же локальный download_hook/функции отправки
     if data.startswith('video:') and link_type == 'video':
         res = int(data.split(':')[1])
         out = os.path.join(DOWNLOAD_DIR, f"{title}_{res}p.mp4")
@@ -301,7 +332,7 @@ async def cb_handler(_, cq: CallbackQuery):
         info = ydl.extract_info(url, download=False)
         await loop.run_in_executor(None, lambda: ydl.download([url]))
 
-        caption = f"{title} — {author}\n"
+        caption = f"{title} — {author}"
         def send_progress(cur, tot):
             pct = int(cur * 100 / tot) if tot else 0
             status_text = f"🚀 Отправка... {pct}%"
@@ -462,15 +493,38 @@ async def cb_handler(_, cq: CallbackQuery):
 
     elif data == 'again':
         await status.delete()
+        # удаляем старую сессию и создаём новую для нового сообщения с клавиатурой
+        sessions = load_sessions()
+        sessions.pop(key, None)
+
         if link_type == 'video':
             kb = format_keyboard(info)
-            await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
+            new_msg = await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
         else:
             kb = format_audio_keyboard()
-            await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
+            new_msg = await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
+
+        new_key = make_session_key(new_msg)
+        sessions[new_key] = {
+            'url': url,
+            'info': info,
+            'title': title,
+            'author': author,
+            'type': link_type,
+            'initiator': sess.get('initiator')
+        }
+        save_sessions(sessions)
         return
 
     await status.delete()
+
+    # очистка сессии по этому сообщению — больше не нужна
+    try:
+        sessions = load_sessions()
+        sessions.pop(key, None)
+        save_sessions(sessions)
+    except Exception:
+        pass
 
 # Shared download hook for audio formats
 def download_hook_shared(d, loop, status, last_status):
