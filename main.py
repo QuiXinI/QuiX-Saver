@@ -49,8 +49,16 @@ with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     USERS_FILE = os.path.join(BASE_DIR, _cfg.get('users_file', "users.json"))
     DOWNLOAD_DIR = os.path.join(BASE_DIR, _cfg.get('download_dir', "downloads"))
 
+# Force rate limit: exactly 2 edits per second (0.5s interval)
+RATE_LIMIT_INTERVAL = 0.5
+# Keep COOLDOWN_TIME for backward compatibility but enforce RATE_LIMIT_INTERVAL
+COOLDOWN_TIME = RATE_LIMIT_INTERVAL
+
 last_status = {"text": None}
 _last_edit_ts = 0.0
+
+# Async lock to serialize edits and avoid race conditions
+_EDIT_LOCK = asyncio.Lock()
 
 # Ensure required files and directories exist
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -93,6 +101,7 @@ def track_user(user_id: int):
             json.dump(users, f, ensure_ascii=False, indent=2)
             f.truncate()
 
+
 def get_msg_id(message):
     """
     Совместимый способ получить идентификатор сообщения из объекта pyrogram.Message.
@@ -103,12 +112,36 @@ def get_msg_id(message):
         mid = getattr(message, "id", None)
     return mid
 
+
 def make_session_key(message):
     mid = get_msg_id(message)
     if mid is None:
         # это должно никогда не случиться, но на случай - явная ошибка
         raise ValueError("Cannot determine message id for session key")
     return f"{message.chat.id}:{mid}"
+
+
+# Centralized, rate-limited editor
+async def safe_edit_text(msg, text):
+    """Редактировать сообщение, соблюдая глобальный лимит RATE_LIMIT_INTERVAL.
+
+    Все вызовы должны идти через этот метод (через create_task/loop).
+    Он сериализует правки с помощью _EDIT_LOCK и ждёт нужный интервал между правками.
+    """
+    global _last_edit_ts
+    async with _EDIT_LOCK:
+        now = time.monotonic()
+        elapsed = now - _last_edit_ts
+        wait = RATE_LIMIT_INTERVAL - elapsed
+        if wait > 0:
+            await asyncio.sleep(wait)
+        try:
+            await msg.edit_text(text)
+        except Exception:
+            # игнорируем ошибки редактирования (пользователь удалил сообщение, флоуд и т.п.)
+            return
+        _last_edit_ts = time.monotonic()
+
 
 # YoutubeDL helper
 def get_ydl(opts):
@@ -309,9 +342,8 @@ async def cb_handler(_, cq: CallbackQuery):
             if status_text and status_text != last_status.get("text"):
                 last_status["text"] = status_text
                 _last_edit_ts = now
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
         opts = {
             'format': f"bestvideo[ext=mp4][height<={res}]+bestaudio/best",
@@ -338,9 +370,8 @@ async def cb_handler(_, cq: CallbackQuery):
             status_text = f"🚀 Отправка... {pct}%"
             if status_text != last_status["text"]:
                 last_status["text"] = status_text
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
         await cq.message.reply_video(
             out,
@@ -399,11 +430,11 @@ async def cb_handler(_, cq: CallbackQuery):
             status_text = f"🚀 Отправка... {pct}%"
             if status_text != last_status["text"]:
                 last_status["text"] = status_text
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
-        await status.edit_text("🚀 Отправка...")
+        # use rate-limited edit for the initial "sending" message
+        await safe_edit_text(status, "🚀 Отправка...")
         await cq.message.reply_audio(
             audio_file,
             caption=f"{title} - {author} 🎧",
@@ -431,9 +462,8 @@ async def cb_handler(_, cq: CallbackQuery):
             if status_text and status_text != last_status.get("text"):
                 last_status["text"] = status_text
                 _last_edit_ts = now
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
         base = os.path.join(DOWNLOAD_DIR, title)
         opts = {
@@ -474,11 +504,11 @@ async def cb_handler(_, cq: CallbackQuery):
             status_text = f"🚀 Отправка... {pct}%"
             if status_text != last_status["text"]:
                 last_status["text"] = status_text
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
-        await status.edit_text("🚀 Отправка...")
+        # initial update via rate-limited editor
+        await safe_edit_text(status, "🚀 Отправка...")
         await cq.message.reply_audio(
             opus_file,
             caption=f"{title} - {author} 🎧",
@@ -516,6 +546,7 @@ async def cb_handler(_, cq: CallbackQuery):
         save_sessions(sessions)
         return
 
+    # удаляем статус-уведомление
     await status.delete()
 
     # очистка сессии по этому сообщению — больше не нужна
@@ -541,9 +572,9 @@ def download_hook_shared(d, loop, status, last_status):
     if status_text and status_text != last_status.get("text"):
         last_status["text"] = status_text
         _last_edit_ts = now
-        loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(status.edit_text(status_text))
-        )
+        # schedule rate-limited edit
+        loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
+
 
 if __name__ == '__main__':
     app.run()
