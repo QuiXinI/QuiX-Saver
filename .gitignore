@@ -11,6 +11,8 @@ ENV/
 # Data and downloads
 data/
 downloads/
+activity.log
+config.json
 
 # Python cache
 __pycache__/

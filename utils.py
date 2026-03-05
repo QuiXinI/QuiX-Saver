@@ -94,8 +94,7 @@ def get_ydl(opts):
 def format_video_keyboard(info):
     """Formats the keyboard with available video resolutions."""
     formats = info.get('formats', [])
-    
-    # Get unique video heights
+
     unique_heights = sorted(list(set(
         f['height'] for f in formats 
         if isinstance(f, dict) and f.get('height') and f.get('vcodec') != 'none'

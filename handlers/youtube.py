@@ -1,72 +1,80 @@
-import asyncio
 import logging
 from pyrogram import filters
-from pyrogram.enums import ChatAction
+from pyrogram.types import Message
 from core import app
-from database import update_session, update_user
-from utils import format_video_keyboard, make_session_key, check_blacklist
+from utils import check_blacklist, get_ydl, format_video_keyboard
+from database import add_session
 
 logger = logging.getLogger(__name__)
 
-@app.on_message(filters.regex(r"https?://(www\.)?youtu"))
+# Custom filter to capture YouTube links but exclude YouTube Music
+def youtube_link_filter(_, __, m: Message):
+    if not m.text:
+        return False
+    text = m.text.lower()
+    # Explicitly exclude YouTube Music links
+    if "music.youtube.com" in text:
+        return False
+    # Capture general YouTube links
+    if "youtube.com" in text or "youtu.be" in text:
+        return True
+    return False
+
+youtube_filter = filters.create(youtube_link_filter)
+
+@app.on_message(filters.text & filters.private & youtube_filter)
 @check_blacklist
-async def handle_youtube_link(_, message):
-    """Handles YouTube links."""
-    update_user(message.from_user.id, {"id": message.from_user.id})
-    url = message.text.strip()
+async def youtube_handler(_, message: Message, url_override: str = None, user_id_override: int = None):
+    """Handles YouTube links, excluding YouTube Music."""
+    url = url_override or message.text
+    user_id = user_id_override or message.from_user.id
+    username = message.from_user.username if not url_override else None
 
-    def fetch_info(url: str):
-        from utils import get_ydl
-        ydl_opts = {
-            'quiet': True,
-            'skip_download': True,
-            'no_warnings': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-            }
-        }
-        with get_ydl(ydl_opts) as ydl:
-            try:
-                return ydl.extract_info(url, download=False)
-            except Exception as e:
-                logger.error(f"yt-dlp failed to extract info for {url}", exc_info=True)
-                return e
+    if url_override:
+        # When called from 'again', message is the bot's status message. Edit it.
+        status_message = await message.edit_text("⏳ Получаю информацию о видео...")
+    else:
+        # For a new link, reply to the user's message.
+        status_message = await message.reply_text("⏳ Получаю информацию о видео...", quote=True)
 
-    await app.send_chat_action(message.chat.id, ChatAction.TYPING)
-    loop = asyncio.get_running_loop()
-    info = await loop.run_in_executor(None, fetch_info, url)
+    try:
+        ydl = get_ydl({'extract_flat': 'in_playlist'})
+        info = await app.loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+    except Exception as e:
+        logger.error(f"Error fetching YouTube info for {url}: {e}")
+        await status_message.edit_text("❌ Не удалось получить информацию. Убедитесь, что ссылка корректна и публично доступна.")
+        return
 
-    if isinstance(info, Exception) or not isinstance(info, dict):
-        logger.error(f"Error fetching formats for {url}: {info}")
-        error_message = "❌ **Ошибка при получении информации о видео.**\n"
-        error_str = str(info)
-        if "Sign in to confirm your age" in error_str:
-            error_message += "Причина: Видео имеет возрастные ограничения."
-        elif "This video is not available" in error_str:
-            error_message += "Причина: Видео недоступно в вашем регионе."
-        elif "copyright" in error_str:
-            error_message += "Причина: Видео защищено авторским правом."
-        else:
-            error_message += "Причина: Неизвестная ошибка. Попробуйте позже."
-        return await message.reply_text(error_message)
+    if not info:
+        await status_message.edit_text("❌ Не удалось получить информацию. Попробуйте другую ссылку.")
+        return
 
-    title = ''.join(c for c in info.get('title', '') if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-    author = info.get('uploader', 'Unknown')
+    # For playlists, take the first video
+    if 'entries' in info and info['entries']:
+        info = info['entries'][0]
 
+    # Prepare data for the message and session
+    title = info.get('title', 'Без названия')
+    author = info.get('uploader', 'Неизвестный автор')
+    
     keyboard = format_video_keyboard(info)
-    reply = await message.reply_photo(
-        info.get('thumbnail'),
-        caption=f"**{title}**\n__{author}__",
-        reply_markup=keyboard
+    
+    sent_message = await status_message.edit_text(
+        f"▶️ **{title}**\n👤 __{author}__",
+        reply_markup=keyboard,
+        disable_web_page_preview=True
     )
 
-    session_key = make_session_key(reply)
+    # Create and save the session, anchored to the bot's reply message
     session_data = {
         'url': url,
-        'info': info,
+        'user_id': user_id,
+        'username': username,
+        'chat_id': message.chat.id,
+        'message_id': sent_message.id,
         'title': title,
         'author': author,
-        'type': 'video',
-        'initiator': message.from_user.id
+        'info': info, # Cache the formats info
+        'type': 'youtube'
     }
-    update_session(session_key, session_data)
+    add_session(user_id, session_data)

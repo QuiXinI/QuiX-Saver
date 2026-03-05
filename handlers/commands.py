@@ -8,8 +8,7 @@ from utils import check_blacklist
 async def start_command(_, message):
     """Handles the /start command."""
     user_id = message.from_user.id
-    
-    # Check if user exists, if not, create a new entry
+
     from database import get_user
     if not get_user(user_id):
         update_user(user_id, {"id": user_id, "lang": "ru"}) # Default lang

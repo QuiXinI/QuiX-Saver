@@ -2,10 +2,6 @@ import asyncio
 
 async def main():
     from core import app
-    import handlers.commands
-    import handlers.youtube
-    import handlers.music
-    import handlers.callbacks
 
     print("Bot is starting...")
     await app.start()

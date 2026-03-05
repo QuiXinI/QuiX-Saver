@@ -3,8 +3,6 @@ import time
 from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN, PROXY_CONFIG
 
-# --- Pyrogram Client Setup ---
-
 if PROXY_CONFIG and PROXY_CONFIG.get("scheme"):
     app = Client(
         "ytbot",
@@ -21,8 +19,6 @@ else:
         bot_token=BOT_TOKEN
     )
 
-
-# --- Rate-Limited Message Editor ---
 
 _EDIT_LOCK = asyncio.Lock()
 _last_edit_time = 0.0
@@ -42,7 +38,6 @@ async def safe_edit_text(message, text, *args, **kwargs):
         try:
             await message.edit_text(text, *args, **kwargs)
         except Exception:
-            # Ignore errors (e.g., message not modified, deleted by user)
             pass
         finally:
             _last_edit_time = time.monotonic()

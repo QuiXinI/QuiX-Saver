@@ -35,11 +35,9 @@ async def handle_video_download(cq, session, data, status_message, loop, last_st
         await safe_edit_text(status_message, f"❌ **Не удалось найти подходящий формат для разрешения {height_str}.**")
         return
 
-    # Select the best candidate by bitrate from the cached info
     best_format = sorted(candidate_formats, key=lambda x: x.get('tbr', 0), reverse=True)[0]
     format_id = best_format['format_id']
 
-    # Use a robust format spec: try to merge with best audio, but fall back to the format itself.
     format_spec = f"{format_id}+bestaudio/{format_id}"
 
     resolution = height_str
@@ -54,8 +52,6 @@ async def handle_video_download(cq, session, data, status_message, loop, last_st
     }
 
     ydl = get_ydl(opts)
-    # Download using the URL, but with the specifically chosen format_id.
-    # This lets yt-dlp fetch fresh info but directs it to the correct format.
     await loop.run_in_executor(None, lambda: ydl.download([session['url']]))
     
     downloaded_file = next(glob.iglob(os.path.join(DOWNLOAD_DIR, f"{title}__{resolution}.*")), None)
