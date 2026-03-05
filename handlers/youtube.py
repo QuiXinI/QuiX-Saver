@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from pyrogram import filters
+from pyrogram.enums import ChatAction
 from core import app
 from database import update_session, update_user
 from utils import format_video_keyboard, make_session_key, check_blacklist
@@ -14,30 +15,36 @@ async def handle_youtube_link(_, message):
     update_user(message.from_user.id, {"id": message.from_user.id})
     url = message.text.strip()
 
-    def fetch_formats(url: str):
+    def fetch_info(url: str):
         from utils import get_ydl
         ydl_opts = {
-            'quiet': False,
+            'quiet': True,
             'skip_download': True,
+            'no_warnings': True,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
             }
         }
         with get_ydl(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=False)
+            try:
+                return ydl.extract_info(url, download=False)
+            except Exception as e:
+                logger.error(f"yt-dlp failed to extract info for {url}", exc_info=True)
+                return e
 
+    await app.send_chat_action(message.chat.id, ChatAction.TYPING)
     loop = asyncio.get_running_loop()
-    try:
-        await app.send_chat_action(message.chat.id, "typing")
-        info = await loop.run_in_executor(None, fetch_formats, url)
-    except Exception as e:
-        logger.error(f"Error fetching formats for {url}: {e}")
+    info = await loop.run_in_executor(None, fetch_info, url)
+
+    if isinstance(info, Exception) or not isinstance(info, dict):
+        logger.error(f"Error fetching formats for {url}: {info}")
         error_message = "❌ **Ошибка при получении информации о видео.**\n"
-        if "Sign in to confirm your age" in str(e):
+        error_str = str(info)
+        if "Sign in to confirm your age" in error_str:
             error_message += "Причина: Видео имеет возрастные ограничения."
-        elif "This video is not available" in str(e):
+        elif "This video is not available" in error_str:
             error_message += "Причина: Видео недоступно в вашем регионе."
-        elif "copyright" in str(e):
+        elif "copyright" in error_str:
             error_message += "Причина: Видео защищено авторским правом."
         else:
             error_message += "Причина: Неизвестная ошибка. Попробуйте позже."
@@ -49,7 +56,7 @@ async def handle_youtube_link(_, message):
     keyboard = format_video_keyboard(info)
     reply = await message.reply_photo(
         info.get('thumbnail'),
-        caption=f"**{title}**\n_{author}_",
+        caption=f"**{title}**\n__{author}__",
         reply_markup=keyboard
     )
 
