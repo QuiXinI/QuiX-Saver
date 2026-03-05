@@ -49,8 +49,16 @@ with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     USERS_FILE = os.path.join(BASE_DIR, _cfg.get('users_file', "users.json"))
     DOWNLOAD_DIR = os.path.join(BASE_DIR, _cfg.get('download_dir', "downloads"))
 
+# Force rate limit: exactly 2 edits per second (0.5s interval)
+RATE_LIMIT_INTERVAL = 0.5
+# Keep COOLDOWN_TIME for backward compatibility but enforce RATE_LIMIT_INTERVAL
+COOLDOWN_TIME = RATE_LIMIT_INTERVAL
+
 last_status = {"text": None}
 _last_edit_ts = 0.0
+
+# Async lock to serialize edits and avoid race conditions
+_EDIT_LOCK = asyncio.Lock()
 
 # Ensure required files and directories exist
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -92,6 +100,48 @@ def track_user(user_id: int):
             f.seek(0)
             json.dump(users, f, ensure_ascii=False, indent=2)
             f.truncate()
+
+
+def get_msg_id(message):
+    """
+    Совместимый способ получить идентификатор сообщения из объекта pyrogram.Message.
+    Поддерживает `.message_id` (старые версии) и `.id` (новые).
+    """
+    mid = getattr(message, "message_id", None)
+    if mid is None:
+        mid = getattr(message, "id", None)
+    return mid
+
+
+def make_session_key(message):
+    mid = get_msg_id(message)
+    if mid is None:
+        # это должно никогда не случиться, но на случай - явная ошибка
+        raise ValueError("Cannot determine message id for session key")
+    return f"{message.chat.id}:{mid}"
+
+
+# Centralized, rate-limited editor
+async def safe_edit_text(msg, text):
+    """Редактировать сообщение, соблюдая глобальный лимит RATE_LIMIT_INTERVAL.
+
+    Все вызовы должны идти через этот метод (через create_task/loop).
+    Он сериализует правки с помощью _EDIT_LOCK и ждёт нужный интервал между правками.
+    """
+    global _last_edit_ts
+    async with _EDIT_LOCK:
+        now = time.monotonic()
+        elapsed = now - _last_edit_ts
+        wait = RATE_LIMIT_INTERVAL - elapsed
+        if wait > 0:
+            await asyncio.sleep(wait)
+        try:
+            await msg.edit_text(text)
+        except Exception:
+            # игнорируем ошибки редактирования (пользователь удалил сообщение, флоуд и т.п.)
+            return
+        _last_edit_ts = time.monotonic()
+
 
 # YoutubeDL helper
 def get_ydl(opts):
@@ -140,13 +190,14 @@ async def start_cmd(_, msg):
 @app.on_message(filters.regex(r"https?://(www\.)?youtu"))
 async def handle_youtube_link(_, msg):
     track_user(msg.from_user.id)
-    url = msg.text.strip()
+    url = msg.text.strip().split('&')[0]
 
     # Function to get formats
     def fetch_formats(url: str):
         ydl_opts = {
             'quiet': False,
             'skip_download': True,
+            'no-playlist': True,
             'http_headers': {
                 'User-Agent': (
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -177,30 +228,33 @@ async def handle_youtube_link(_, msg):
     ).strip()
     author = info.get('uploader','Unknown')
 
-    sessions = load_sessions()
-    sessions[str(msg.from_user.id)] = {
-        'url': url,
-        'info': info,
-        'title': title,
-        'author': author,
-        'type': 'video'
-    }
-    save_sessions(sessions)
-
     kb = format_keyboard(info)
-    await msg.reply_photo(
+    # отправляем сообщение с клавиатурой и сохраняем сессию под ключем chat_id:message_id
+    reply = await msg.reply_photo(
         info.get('thumbnail'),
         caption=f"{title} - {author}",
         reply_markup=kb
     )
 
+    sessions = load_sessions()
+    key = make_session_key(reply)
+    sessions[key] = {
+        'url': url,
+        'info': info,
+        'title': title,
+        'author': author,
+        'type': 'video',
+        'initiator': msg.from_user.id
+    }
+    save_sessions(sessions)
+
 @app.on_message(filters.regex(r"https?://(music\.youtube\.com|music\.yandex\.ru)"))
 async def handle_music_link(_, msg):
     track_user(msg.from_user.id)
-    url = msg.text.strip()
+    url = msg.text.strip().split('&')[0]
 
     def fetch_info(url: str):
-        ydl_opts = {'quiet': False, 'skip_download': True}
+        ydl_opts = {'quiet': False, 'skip_download': True, 'no-playlist': True}
         if "yandex" in url:
             ydl_opts['cookiesfrombrowser'] = ('firefox',)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -224,29 +278,39 @@ async def handle_music_link(_, msg):
     if author in full_title:
         title = full_title.replace(author, '').strip().replace('  ', ' ').strip('- ')
 
+    kb = format_audio_keyboard()
+    reply = await msg.reply_text(
+        f"{title} - {author}",
+        reply_markup=kb
+    )
+
     sessions = load_sessions()
-    sessions[str(msg.from_user.id)] = {
+    key = make_session_key(reply)
+    sessions[key] = {
         'url': url,
         'info': info,
         'title': title,
         'author': author,
-        'type': 'audio'
+        'type': 'audio',
+        'initiator': msg.from_user.id
     }
     save_sessions(sessions)
-
-    kb = format_audio_keyboard()
-    await msg.reply_text(
-        f"{title} - {author}",
-        reply_markup=kb
-    )
 
 @app.on_callback_query()
 async def cb_handler(_, cq: CallbackQuery):
     track_user(cq.from_user.id)
     sessions = load_sessions()
-    sess = sessions.get(str(cq.from_user.id))
+    key = make_session_key(cq.message)
+
+    # поддержка старых сессий (по user_id) — опционально, но оставим как fallback
+    sess = sessions.get(key) or sessions.get(str(cq.from_user.id))
     if not sess:
         return await cq.answer("Сессия не найдена", show_alert=True)
+
+    # если сессия была по user_id (фолбек), то лучше перенести её на message-ключ, но не обязательно
+    if key not in sessions and str(cq.from_user.id) in sessions:
+        sessions[key] = sessions.pop(str(cq.from_user.id))
+        save_sessions(sessions)
 
     await cq.message.edit_reply_markup(None)
     url = sess['url']; title = sess['title']; author = sess['author']; info = sess['info']; link_type = sess.get('type')
@@ -260,6 +324,7 @@ async def cb_handler(_, cq: CallbackQuery):
     last_status = {"text": None}
     data = cq.data
 
+    # функция загрузки используем один и тот же локальный download_hook/функции отправки
     if data.startswith('video:') and link_type == 'video':
         res = int(data.split(':')[1])
         out = os.path.join(DOWNLOAD_DIR, f"{title}_{res}p.mp4")
@@ -278,14 +343,14 @@ async def cb_handler(_, cq: CallbackQuery):
             if status_text and status_text != last_status.get("text"):
                 last_status["text"] = status_text
                 _last_edit_ts = now
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
         opts = {
             'format': f"bestvideo[ext=mp4][height<={res}]+bestaudio/best",
             'merge_output_format': 'mp4',
             'quiet': False,
+            'no-playlist': True,
             'outtmpl': out,
             'progress_hooks': [download_hook],
             'http_headers': {
@@ -301,15 +366,14 @@ async def cb_handler(_, cq: CallbackQuery):
         info = ydl.extract_info(url, download=False)
         await loop.run_in_executor(None, lambda: ydl.download([url]))
 
-        caption = f"{title} — {author}\n"
+        caption = f"{title} — {author}"
         def send_progress(cur, tot):
             pct = int(cur * 100 / tot) if tot else 0
             status_text = f"🚀 Отправка... {pct}%"
             if status_text != last_status["text"]:
                 last_status["text"] = status_text
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
         await cq.message.reply_video(
             out,
@@ -335,6 +399,7 @@ async def cb_handler(_, cq: CallbackQuery):
             'format': 'bestaudio/best',
             'outtmpl': base + '.%(ext)s',
             'quiet': False,
+            'no-playlist': True,
             'postprocessors': postprocessors,
             'progress_hooks': [
                 lambda d: download_hook_shared(d, loop, status, last_status)
@@ -368,11 +433,11 @@ async def cb_handler(_, cq: CallbackQuery):
             status_text = f"🚀 Отправка... {pct}%"
             if status_text != last_status["text"]:
                 last_status["text"] = status_text
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
-        await status.edit_text("🚀 Отправка...")
+        # use rate-limited edit for the initial "sending" message
+        await safe_edit_text(status, "🚀 Отправка...")
         await cq.message.reply_audio(
             audio_file,
             caption=f"{title} - {author} 🎧",
@@ -400,15 +465,15 @@ async def cb_handler(_, cq: CallbackQuery):
             if status_text and status_text != last_status.get("text"):
                 last_status["text"] = status_text
                 _last_edit_ts = now
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
         base = os.path.join(DOWNLOAD_DIR, title)
         opts = {
             'format': 'bestaudio/best',
             'outtmpl': base + '.%(ext)s',
             'quiet': False,
+            'no-playlist': True,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'opus',
@@ -443,11 +508,11 @@ async def cb_handler(_, cq: CallbackQuery):
             status_text = f"🚀 Отправка... {pct}%"
             if status_text != last_status["text"]:
                 last_status["text"] = status_text
-                loop.call_soon_threadsafe(
-                    lambda: asyncio.create_task(status.edit_text(status_text))
-                )
+                # schedule rate-limited edit
+                loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
 
-        await status.edit_text("🚀 Отправка...")
+        # initial update via rate-limited editor
+        await safe_edit_text(status, "🚀 Отправка...")
         await cq.message.reply_audio(
             opus_file,
             caption=f"{title} - {author} 🎧",
@@ -462,15 +527,39 @@ async def cb_handler(_, cq: CallbackQuery):
 
     elif data == 'again':
         await status.delete()
+        # удаляем старую сессию и создаём новую для нового сообщения с клавиатурой
+        sessions = load_sessions()
+        sessions.pop(key, None)
+
         if link_type == 'video':
             kb = format_keyboard(info)
-            await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
+            new_msg = await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
         else:
             kb = format_audio_keyboard()
-            await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
+            new_msg = await cq.message.reply_text(f"{title} - {author}", reply_markup=kb)
+
+        new_key = make_session_key(new_msg)
+        sessions[new_key] = {
+            'url': url,
+            'info': info,
+            'title': title,
+            'author': author,
+            'type': link_type,
+            'initiator': sess.get('initiator')
+        }
+        save_sessions(sessions)
         return
 
+    # удаляем статус-уведомление
     await status.delete()
+
+    # очистка сессии по этому сообщению — больше не нужна
+    try:
+        sessions = load_sessions()
+        sessions.pop(key, None)
+        save_sessions(sessions)
+    except Exception:
+        pass
 
 # Shared download hook for audio formats
 def download_hook_shared(d, loop, status, last_status):
@@ -487,9 +576,9 @@ def download_hook_shared(d, loop, status, last_status):
     if status_text and status_text != last_status.get("text"):
         last_status["text"] = status_text
         _last_edit_ts = now
-        loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(status.edit_text(status_text))
-        )
+        # schedule rate-limited edit
+        loop.call_soon_threadsafe(lambda st=status_text: asyncio.create_task(safe_edit_text(status, st)))
+
 
 if __name__ == '__main__':
     app.run()
